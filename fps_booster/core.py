@@ -58,6 +58,7 @@ class ProcessGroup:
     name: str
     pids: list[int] = field(default_factory=list)
     memory_bytes: int = 0
+    exe: str | None = None  # full path, if the OS lets us read it (for the icon)
 
     @property
     def count(self) -> int:
@@ -76,7 +77,7 @@ def list_process_groups(min_memory_mb: float = 0) -> list[ProcessGroup]:
     """
     own = _own_pids()
     groups: dict[str, ProcessGroup] = {}
-    for proc in psutil.process_iter(["pid", "name", "memory_info"]):
+    for proc in psutil.process_iter(["pid", "name", "memory_info", "exe"]):
         info = proc.info
         name = info.get("name")
         mem = info.get("memory_info")
@@ -87,6 +88,8 @@ def list_process_groups(min_memory_mb: float = 0) -> list[ProcessGroup]:
         group = groups.setdefault(name.lower(), ProcessGroup(name=name))
         group.pids.append(info["pid"])
         group.memory_bytes += mem.rss
+        if not group.exe and info.get("exe"):
+            group.exe = info["exe"]
 
     result = [g for g in groups.values() if g.memory_mb >= min_memory_mb]
     result.sort(key=lambda g: g.memory_bytes, reverse=True)

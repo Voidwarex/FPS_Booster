@@ -13,15 +13,20 @@ open the app:
 ## Editing a preset
 
 The editor lists running programs grouped by name (e.g. all `chrome.exe`
-windows together) and sorted by memory use. Tick the ones the preset should
-close.
+windows together), in alphabetical order, each with its own icon so you can
+tell what it is. Tick the ones the preset should close.
 
 ![Preset editor](docs/editor.png)
 
 - **Search** and the **memory filter** (All / ≥ 25 MB / ≥ 100 MB / ≥ 250 MB) narrow the list.
+- **A–Z / Memory** switches between alphabetical order and biggest memory users first.
 - **Ticked only** shows just the processes already in the preset.
 - **Add by name** lets you add a program that isn't running right now (e.g. `Discord.exe`).
-- Ticked programs that aren't running stay at the top, so you can still untick them.
+- Ticked programs that aren't running stay in the list, so you can still untick them.
+
+On Windows the icon is read from the program's `.exe`. If it can't be read
+(no icon, or a protected program while not running as administrator), and on
+Linux/macOS, a coloured letter badge is shown instead.
 
 After a boost you get a summary of what was closed and how much RAM was freed:
 
@@ -63,4 +68,5 @@ python -m pytest
 ```
 
 - `fps_booster/core.py`: process scanning, killing and preset storage (no GUI).
+- `fps_booster/icons.py`: program icons (.exe icons on Windows, letter badges elsewhere).
 - `fps_booster/app.py`: the CustomTkinter UI.

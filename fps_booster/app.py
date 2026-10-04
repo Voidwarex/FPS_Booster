@@ -20,6 +20,7 @@ from .core import (
     kill_processes,
     list_process_groups,
 )
+from .icons import get_icon
 
 # ---- Theme ---------------------------------------------------------------
 BG = "#0b0d12"
@@ -35,7 +36,9 @@ TEXT = "#e8ecf4"
 MUTED = "#8a93a8"
 
 MEMORY_FILTERS = {"All": 0, "≥ 25 MB": 25, "≥ 100 MB": 100, "≥ 250 MB": 250}
+SORT_OPTIONS = ("A–Z", "Memory")
 MAX_ROWS = 200
+ICON_SIZE = 20
 
 
 def font(size: int = 13, weight: str = "normal") -> ctk.CTkFont:
@@ -326,6 +329,12 @@ class EditorView(ctk.CTkFrame):
             selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
             text_color=TEXT, font=font(12), command=lambda _: self.render(),
         ).pack(side="left", padx=4)
+        self.sort_var = ctk.StringVar(value=SORT_OPTIONS[0])
+        ctk.CTkSegmentedButton(
+            bar, values=list(SORT_OPTIONS), variable=self.sort_var,
+            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+            text_color=TEXT, font=font(12), command=lambda _: self.render(),
+        ).pack(side="left", padx=(10, 4))
         self.only_selected = ctk.BooleanVar(value=False)
         ctk.CTkSwitch(
             bar, text="Ticked only", variable=self.only_selected, progress_color=ACCENT,
@@ -398,17 +407,24 @@ class EditorView(ctk.CTkFrame):
     def scan(self):
         self.refresh_btn.configure(state="disabled", text="Scanning…")
 
+        def work():
+            groups = list_process_groups(0)
+            # Icon extraction is the slow part, so it happens here, off the UI thread.
+            return groups, {g.name.lower(): get_icon(g.name, g.exe) for g in groups}
+
         def done(ok: bool, result):
             if not self.winfo_exists():
                 return
             self.refresh_btn.configure(state="normal", text="⟳ Refresh")
             if ok:
-                self.groups = result
+                self.groups, icons = result
+                for key, image in icons.items():
+                    self.app.set_icon(key, image)
                 self.render()
             else:
                 self.message.configure(text=f"Couldn't read processes: {result}")
 
-        run_in_thread(self.app, lambda: list_process_groups(0), done)
+        run_in_thread(self.app, work, done)
 
     # -- rendering --
 
@@ -428,8 +444,8 @@ class EditorView(ctk.CTkFrame):
         running = {g.name.lower() for g in self.groups}
 
         rows: list[tuple[str, ProcessGroup | None]] = []
-        # Ticked processes that aren't open right now stay visible at the top
-        # so they can still be unticked.
+        # Ticked processes that aren't open right now stay visible so they
+        # can still be unticked.
         for key, name in self.selected.items():
             if key not in running and query in key:
                 rows.append((name, None))
@@ -442,6 +458,11 @@ class EditorView(ctk.CTkFrame):
             if g.memory_mb < min_mb and key not in self.selected:
                 continue
             rows.append((g.name, g))
+
+        if self.sort_var.get() == "Memory":
+            rows.sort(key=lambda row: row[1].memory_bytes if row[1] else -1, reverse=True)
+        else:
+            rows.sort(key=lambda row: row[0].lower())
 
         top_mb = max((g.memory_mb for g in self.groups), default=1) or 1
         for r, (name, group) in enumerate(rows[:MAX_ROWS]):
@@ -472,7 +493,8 @@ class EditorView(ctk.CTkFrame):
         box.grid(row=r, column=0, sticky="w", **pad)
 
         label = ctk.CTkLabel(
-            self.list_frame, text=name, anchor="w", font=font(13, "bold" if ticked else "normal"),
+            self.list_frame, text=f"  {name}", anchor="w", compound="left",
+            image=self.app.icon_for(name), font=font(13, "bold" if ticked else "normal"),
             text_color=TEXT if ticked or group else MUTED, cursor="hand2",
         )
         label.grid(row=r, column=1, sticky="ew", **pad)
@@ -578,6 +600,9 @@ class FPSBoosterApp(ctk.CTk):
         self.body = ctk.CTkFrame(self, fg_color="transparent")
         self.body.pack(fill="both", expand=True, padx=22, pady=(0, 20))
         self.view: ctk.CTkFrame | None = None
+        # lowercase process name -> CTkImage. Kept for the whole session so a
+        # ticked program keeps its real icon after it has been closed.
+        self._icons: dict[str, ctk.CTkImage] = {}
 
         self._update_ram()
         self.show_home()
@@ -593,6 +618,16 @@ class FPSBoosterApp(ctk.CTk):
 
     def show_editor(self, index: int):
         self._swap(EditorView(self, index))
+
+    def set_icon(self, name: str, image) -> None:
+        current = self._icons.get(name.lower())
+        if current is None or current.cget("light_image") is not image:
+            self._icons[name.lower()] = ctk.CTkImage(image, image, size=(ICON_SIZE, ICON_SIZE))
+
+    def icon_for(self, name: str) -> ctk.CTkImage:
+        if name.lower() not in self._icons:
+            self.set_icon(name, get_icon(name))  # letter badge
+        return self._icons[name.lower()]
 
     def _update_ram(self):
         mem = psutil.virtual_memory()

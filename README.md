@@ -32,6 +32,35 @@ After a boost you get a summary of what was closed and how much RAM was freed:
 
 ![Boost result](docs/boost.png)
 
+## Tweaks (Windows)
+
+The **Tweaks** tab has well-known Windows settings that can raise FPS or cut
+input lag. Each one shows whether it's on, and has a switch to turn it on or off:
+
+![Tweaks](docs/tweaks.png)
+
+| Tweak | Helps | Admin | Restart |
+|---|---|:-:|:-:|
+| High performance power plan (Ultimate Performance where High is hidden) | FPS, stutter | | |
+| Turn on Game Mode | FPS | | |
+| Turn off Xbox background recording (Game DVR) | FPS, latency | | |
+| Turn off mouse acceleration | Aim consistency | | |
+| Prioritise games in the scheduler (MMCSS) | FPS | ✔ | ✔ |
+| Turn off power throttling | FPS (mostly laptops) | ✔ | ✔ |
+| Turn off network throttling | Network | ✔ | ✔ |
+| Turn off Nagle's algorithm | Ping in TCP games | ✔ | ✔ |
+| Hardware-accelerated GPU scheduling (not in "Apply recommended") | Latency | ✔ | ✔ |
+| Clear standby memory (once, or on every BOOST) | Stutter | ✔ | |
+
+- **Apply recommended** turns on everything except GPU scheduling, whose
+  results vary by game and GPU.
+- **Revert all** puts everything back the way it was. Before a tweak changes
+  anything, your original values are saved to `tweaks_backup.json` (next to
+  `presets.json`), so turning a tweak off restores exactly what you had.
+- Tweaks marked ADMIN need FPS Booster to run as administrator. The
+  **Restart as admin** button does that for you.
+- Nothing here turns off security features (Defender, Memory Integrity, etc.).
+
 ## Install & run
 
 Requires Python 3.10+ (with Tk, which the python.org installer includes on Windows).
@@ -58,7 +87,8 @@ the programs you close is lost.
 - Windows: `%APPDATA%\FPSBooster\presets.json`
 - Linux/macOS: `~/.config/fps_booster/presets.json`
 
-Set `FPS_BOOSTER_CONFIG` to use a different file.
+Set `FPS_BOOSTER_CONFIG` to use a different file. Tweak backups are kept in
+`tweaks_backup.json` in the same folder.
 
 ## Development
 
@@ -69,4 +99,5 @@ python -m pytest
 
 - `fps_booster/core.py`: process scanning, killing and preset storage (no GUI).
 - `fps_booster/icons.py`: program icons (.exe icons on Windows, letter badges elsewhere).
+- `fps_booster/tweaks.py`: Windows tweaks, with backup and revert.
 - `fps_booster/app.py`: the CustomTkinter UI.

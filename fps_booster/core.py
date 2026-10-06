@@ -103,6 +103,7 @@ class KillReport:
     failed: dict[str, str] = field(default_factory=dict)  # name -> reason
     not_running: list[str] = field(default_factory=list)
     skipped_protected: list[str] = field(default_factory=list)
+    extras: list[str] = field(default_factory=list)  # e.g. "Standby memory cleared"
 
     @property
     def freed_mb(self) -> float:
@@ -203,15 +204,23 @@ class PresetStore:
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path else default_config_path()
         self.slots: list[Preset | None] = [None] * MAX_PRESETS
+        self.settings: dict = {}
         self.load()
 
     def load(self) -> None:
         self.slots = [None] * MAX_PRESETS
+        self.settings = {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
-        raw_slots = data.get("slots", []) if isinstance(data, dict) else []
+        if not isinstance(data, dict):
+            return
+        if isinstance(data.get("settings"), dict):
+            self.settings = data["settings"]
+        raw_slots = data.get("slots")
+        if not isinstance(raw_slots, list):
+            return
         for i, raw in enumerate(raw_slots[:MAX_PRESETS]):
             if isinstance(raw, dict):
                 self.slots[i] = Preset.from_dict(raw)
@@ -221,6 +230,7 @@ class PresetStore:
         data = {
             "version": 1,
             "slots": [p.to_dict() if p else None for p in self.slots],
+            "settings": self.settings,
         }
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -228,6 +238,10 @@ class PresetStore:
 
     def set(self, index: int, preset: Preset) -> None:
         self.slots[index] = preset
+        self.save()
+
+    def set_setting(self, name: str, value) -> None:
+        self.settings[name] = value
         self.save()
 
     def delete(self, index: int) -> None:

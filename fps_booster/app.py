@@ -21,6 +21,8 @@ from .core import (
     list_process_groups,
 )
 from .icons import get_icon
+from . import tweaks
+from .tweaks import TWEAKS, Tweak, TweakError
 
 # ---- Theme ---------------------------------------------------------------
 BG = "#0b0d12"
@@ -157,6 +159,7 @@ class BoostResultDialog(Dialog):
         section("✖ Couldn't close", DANGER, [f"{n} — {why}" for n, why in report.failed.items()])
         section("○ Not running", MUTED, report.not_running)
         section("⛨ Skipped (system process)", WARN, report.skipped_protected)
+        section("＋ Also", ACCENT, report.extras)
 
         ctk.CTkButton(
             self, text="Nice", height=38, fg_color=ACCENT, hover_color=ACCENT_HOVER,
@@ -277,7 +280,19 @@ class HomeView(ctk.CTkFrame):
             )
             BoostResultDialog(self.app, preset.name, result)
 
-        run_in_thread(self.app, lambda: kill_processes(preset.processes), done)
+        clear_standby = bool(self.app.store.settings.get("clear_standby_on_boost"))
+
+        def work() -> KillReport:
+            report = kill_processes(preset.processes)
+            if clear_standby:
+                try:
+                    tweaks.clear_standby_memory()
+                    report.extras.append("Standby memory cleared")
+                except TweakError as exc:
+                    report.extras.append(f"Couldn't clear standby memory: {exc}")
+            return report
+
+        run_in_thread(self.app, work, done)
 
 
 # ---- Editor view: tick the processes a preset should kill ----------------
@@ -568,14 +583,289 @@ class EditorView(ctk.CTkFrame):
             self.app.show_home()
 
 
+# ---- Tweaks view: Windows settings for FPS / input lag --------------------
+
+CATEGORY_COLORS = {"FPS": ACCENT, "Input lag": "#7aa2ff", "Network": "#c792ea"}
+
+
+def pill(parent, text: str, color: str) -> ctk.CTkLabel:
+    return ctk.CTkLabel(
+        parent, text=f" {text} ", font=font(10, "bold"), fg_color=color, text_color=BG,
+        corner_radius=6, height=18,
+    )
+
+
+class TweaksView(ctk.CTkFrame):
+    def __init__(self, app: "FPSBoosterApp"):
+        super().__init__(app.body, fg_color="transparent")
+        self.app = app
+        self.ctx = app.tweak_ctx
+        self.switches: dict[str, ctk.CTkSwitch] = {}
+        self.buttons: list[ctk.CTkButton] = []
+
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.pack(fill="x")
+        text = ctk.CTkFrame(top, fg_color="transparent")
+        text.pack(side="left")
+        ctk.CTkLabel(text, text="System tweaks", font=font(18, "bold"), text_color=TEXT).pack(anchor="w")
+        ctk.CTkLabel(
+            text, text="Well-known Windows settings that raise FPS or cut input lag. "
+            "Every one can be switched back off.",
+            font=font(13), text_color=MUTED,
+        ).pack(anchor="w")
+        self.apply_btn = ctk.CTkButton(
+            top, text="⚡ Apply recommended", height=36, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            text_color="#04130d", font=font(13, "bold"), command=self.apply_recommended,
+        )
+        self.apply_btn.pack(side="right")
+        self.revert_btn = ctk.CTkButton(
+            top, text="Revert all", width=100, height=36, fg_color="transparent", border_width=1,
+            border_color=BORDER, hover_color=PANEL_HI, text_color=TEXT, font=font(13),
+            command=self.revert_all,
+        )
+        self.revert_btn.pack(side="right", padx=8)
+        self.buttons += [self.apply_btn, self.revert_btn]
+
+        if self.ctx is None:
+            self._banner("Tweaks change Windows settings, so they're only available on Windows.", MUTED)
+        elif not app.is_admin:
+            banner = self._banner(
+                "Tweaks marked ADMIN need administrator rights. Restart FPS Booster as admin to use them.",
+                WARN,
+            )
+            ctk.CTkButton(
+                banner, text="🛡 Restart as admin", width=150, height=30, fg_color=WARN,
+                hover_color="#e09a30", text_color="#1a1200", font=font(12, "bold"),
+                command=self.restart_as_admin,
+            ).pack(side="right", padx=10, pady=8)
+
+        self.list = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.list.pack(fill="both", expand=True, pady=(10, 6))
+        for tweak in TWEAKS:
+            self._tweak_card(tweak)
+        self._standby_card()
+
+        self.status = ctk.CTkLabel(self, text="", font=font(13), text_color=MUTED, anchor="w")
+        self.status.pack(fill="x", padx=4)
+        self._show_reboot_note()
+        self.refresh_states()
+
+    # -- layout --
+
+    def _banner(self, message: str, color: str) -> ctk.CTkFrame:
+        banner = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10, border_width=1, border_color=color)
+        banner.pack(fill="x", pady=(12, 0))
+        ctk.CTkLabel(banner, text=message, font=font(13), text_color=color).pack(
+            side="left", padx=14, pady=10
+        )
+        return banner
+
+    def _card(self, title: str, description: str, tags: list[tuple[str, str]]) -> ctk.CTkFrame:
+        card = ctk.CTkFrame(self.list, fg_color=PANEL, corner_radius=12, border_width=1, border_color=BORDER)
+        card.pack(fill="x", padx=2, pady=4)
+        card.grid_columnconfigure(0, weight=1)
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="w", padx=16, pady=(12, 2))
+        ctk.CTkLabel(head, text=title, font=font(14, "bold"), text_color=TEXT).pack(side="left")
+        for text, color in tags:
+            pill(head, text, color).pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(
+            card, text=description, font=font(12), text_color=MUTED, justify="left",
+            anchor="w", wraplength=700,
+        ).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 12))
+        return card
+
+    def _allowed(self, tweak: Tweak) -> bool:
+        return self.ctx is not None and (self.app.is_admin or not tweak.admin)
+
+    def _tweak_card(self, tweak: Tweak):
+        tags = [(tweak.category.upper(), CATEGORY_COLORS[tweak.category])]
+        if tweak.admin:
+            tags.append(("ADMIN", WARN))
+        if tweak.reboot:
+            tags.append(("RESTART", MUTED))
+        card = self._card(tweak.title, tweak.description, tags)
+        switch = ctk.CTkSwitch(
+            card, text="", width=50, switch_width=46, switch_height=24, progress_color=ACCENT,
+            command=lambda: self.toggle(tweak),
+        )
+        switch.grid(row=0, column=1, rowspan=2, padx=16)
+        switch.configure(state="disabled")  # enabled once its state is known
+        self.switches[tweak.id] = switch
+
+    def _standby_card(self):
+        card = self._card(
+            "Clear standby memory",
+            "Windows keeps recently used files in RAM (the standby list). When it gets big, some "
+            "games stutter while Windows frees it up. This empties it, like the \"Empty Standby "
+            "List\" option in Microsoft's RAMMap. Nothing is lost.",
+            [("FPS", ACCENT), ("ADMIN", WARN)],
+        )
+        side = ctk.CTkFrame(card, fg_color="transparent")
+        side.grid(row=0, column=1, rowspan=2, padx=16)
+        allowed = self.ctx is not None and self.app.is_admin
+        self.clear_btn = ctk.CTkButton(
+            side, text="🧹 Clear now", width=120, height=32, fg_color=PANEL_HI, hover_color=BORDER,
+            font=font(13), command=self.clear_standby, state="normal" if allowed else "disabled",
+        )
+        self.clear_btn.pack()
+        self.standby_on_boost = ctk.BooleanVar(
+            value=bool(self.app.store.settings.get("clear_standby_on_boost"))
+        )
+        ctk.CTkCheckBox(
+            side, text="On every BOOST", variable=self.standby_on_boost, font=font(12),
+            text_color=TEXT, fg_color=ACCENT, hover_color=ACCENT_HOVER, checkbox_width=18,
+            checkbox_height=18, command=self._save_standby_setting,
+            state="normal" if allowed else "disabled",
+        ).pack(pady=(6, 0))
+
+    # -- state --
+
+    def _set_busy(self, busy: bool):
+        for b in self.buttons:
+            b.configure(state="disabled" if busy or self.ctx is None else "normal")
+        for t in TWEAKS:
+            if busy or not self._allowed(t):
+                self.switches[t.id].configure(state="disabled")
+
+    def refresh_states(self, then: Callable[[], None] | None = None):
+        if self.ctx is None:
+            self._set_busy(True)
+            return
+        self._set_busy(True)
+
+        def work():
+            states = {}
+            for t in TWEAKS:
+                try:
+                    states[t.id] = t.is_applied(self.ctx)
+                except Exception as exc:
+                    states[t.id] = exc
+            return states
+
+        def done(ok, states):
+            if not self.winfo_exists():
+                return
+            self._set_busy(False)
+            if not ok:
+                self.status.configure(text=f"Couldn't read settings: {states}", text_color=DANGER)
+                return
+            for t in TWEAKS:
+                switch, state = self.switches[t.id], states[t.id]
+                switch.configure(state="normal")
+                switch.select() if state is True else switch.deselect()
+                if isinstance(state, Exception) or not self._allowed(t):
+                    switch.configure(state="disabled")
+            if then:
+                then()
+
+        run_in_thread(self.app, work, done)
+
+    def _show_reboot_note(self):
+        if self.app.pending_reboot:
+            self.status.configure(
+                text="↻ Restart your PC to finish: " + ", ".join(sorted(self.app.pending_reboot)),
+                text_color=WARN,
+            )
+
+    def _run(self, work: Callable[[], list[str]], success: str):
+        """Run tweak changes off the UI thread; ``work`` returns error lines."""
+        self._set_busy(True)
+        self.status.configure(text="Working…", text_color=MUTED)
+
+        def done(ok, errors):
+            if not self.winfo_exists():
+                return
+            if not ok:
+                errors = [str(errors)]
+
+            def report():
+                if errors:
+                    self.status.configure(text="✖ " + " · ".join(errors), text_color=DANGER)
+                elif self.app.pending_reboot:
+                    self._show_reboot_note()
+                else:
+                    self.status.configure(text=success, text_color=ACCENT)
+
+            self.refresh_states(then=report)
+
+        run_in_thread(self.app, work, done)
+
+    def _change(self, tweak: Tweak, on: bool) -> str | None:
+        try:
+            tweak.apply(self.ctx) if on else tweak.revert(self.ctx)
+        except Exception as exc:
+            return f"{tweak.title}: {exc}"
+        if tweak.reboot:
+            self.app.pending_reboot.add(tweak.title)
+        return None
+
+    # -- actions --
+
+    def toggle(self, tweak: Tweak):
+        on = bool(self.switches[tweak.id].get())
+        self._run(
+            lambda: [e for e in [self._change(tweak, on)] if e],
+            f"✔ {tweak.title} {'on' if on else 'off'}",
+        )
+
+    def apply_recommended(self):
+        def work():
+            errors = []
+            for t in TWEAKS:
+                if t.recommended and self._allowed(t) and not t.is_applied(self.ctx):
+                    if error := self._change(t, True):
+                        errors.append(error)
+            return errors
+
+        self._run(work, "✔ Recommended tweaks applied")
+
+    def revert_all(self):
+        def work():
+            errors = []
+            for t in TWEAKS:
+                if self._allowed(t) and t.is_applied(self.ctx):
+                    if error := self._change(t, False):
+                        errors.append(error)
+            return errors
+
+        self._run(work, "✔ All tweaks reverted to your previous settings")
+
+    def clear_standby(self):
+        self.clear_btn.configure(state="disabled", text="Clearing…")
+
+        def done(ok, result):
+            if not self.winfo_exists():
+                return
+            self.clear_btn.configure(state="normal", text="🧹 Clear now")
+            if ok:
+                self.status.configure(text="✔ Standby memory cleared", text_color=ACCENT)
+            else:
+                self.status.configure(text=f"✖ Couldn't clear standby memory: {result}", text_color=DANGER)
+
+        run_in_thread(self.app, tweaks.clear_standby_memory, done)
+
+    def _save_standby_setting(self):
+        self.app.store.set_setting("clear_standby_on_boost", bool(self.standby_on_boost.get()))
+
+    def restart_as_admin(self):
+        if tweaks.relaunch_as_admin():
+            self.app.destroy()
+        else:
+            self.status.configure(text="✖ Didn't get administrator rights", text_color=DANGER)
+
+
 # ---- Main window ---------------------------------------------------------
 
 
 class FPSBoosterApp(ctk.CTk):
-    def __init__(self, store: PresetStore | None = None):
+    def __init__(self, store: PresetStore | None = None, tweak_ctx: tweaks.Context | None = None):
         ctk.set_appearance_mode("dark")
         super().__init__(fg_color=BG)
         self.store = store or PresetStore()
+        self.tweak_ctx = tweak_ctx or tweaks.default_context(self.store.path.parent / "tweaks_backup.json")
+        self.is_admin = tweaks.is_admin()
+        self.pending_reboot: set[str] = set()  # tweak titles changed this session
         self.title("FPS Booster")
         self.geometry("1080x700")
         self.minsize(960, 600)
@@ -592,6 +882,14 @@ class FPSBoosterApp(ctk.CTk):
 
         ram = ctk.CTkFrame(header, fg_color=PANEL, corner_radius=12)
         ram.pack(side="right")
+
+        self.nav = ctk.CTkSegmentedButton(
+            header, values=["Presets", "Tweaks"], width=220, height=36, font=font(14, "bold"),
+            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER, text_color=TEXT,
+            fg_color=PANEL, unselected_color=PANEL, unselected_hover_color=PANEL_HI,
+            command=lambda tab: self.show_tweaks() if tab == "Tweaks" else self.show_home(),
+        )
+        self.nav.pack(side="left", padx=40)
         self.ram_label = ctk.CTkLabel(ram, text="RAM", font=font(12, "bold"), text_color=TEXT)
         self.ram_label.pack(anchor="w", padx=14, pady=(8, 2))
         self.ram_bar = ctk.CTkProgressBar(ram, width=220, height=10, fg_color=PANEL_HI)
@@ -614,10 +912,16 @@ class FPSBoosterApp(ctk.CTk):
         view.pack(fill="both", expand=True)
 
     def show_home(self):
+        self.nav.set("Presets")
         self._swap(HomeView(self))
 
     def show_editor(self, index: int):
+        self.nav.set("Presets")
         self._swap(EditorView(self, index))
+
+    def show_tweaks(self):
+        self.nav.set("Tweaks")
+        self._swap(TweaksView(self))
 
     def set_icon(self, name: str, image) -> None:
         current = self._icons.get(name.lower())

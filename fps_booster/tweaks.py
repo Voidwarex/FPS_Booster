@@ -239,25 +239,26 @@ BALANCED = "381b4222-f694-41f0-9685-ff5bb260df2e"
 _GUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
+def active_scheme(ctx: Context) -> str:
+    match = _GUID.search(ctx.run(["powercfg", "/getactivescheme"]))
+    if not match:
+        raise TweakError("Couldn't read the active power plan")
+    return match.group(0).lower()
+
+
 @dataclass
 class PowerPlanTweak(Tweak):
     """Switch to High performance (or Ultimate Performance where High is hidden)."""
-
-    def _active(self, ctx) -> str:
-        match = _GUID.search(ctx.run(["powercfg", "/getactivescheme"]))
-        if not match:
-            raise TweakError("Couldn't read the active power plan")
-        return match.group(0).lower()
 
     def _ours(self, ctx) -> set[str]:
         saved = ctx.backup.get(self.id) or {}
         return {HIGH_PERFORMANCE} | ({saved["created"]} if saved.get("created") else set())
 
     def is_applied(self, ctx):
-        return self._active(ctx) in self._ours(ctx)
+        return active_scheme(ctx) in self._ours(ctx)
 
     def apply(self, ctx):
-        ctx.backup.keep(self.id, {"previous": self._active(ctx), "created": None})
+        ctx.backup.keep(self.id, {"previous": active_scheme(ctx), "created": None})
         try:
             ctx.run(["powercfg", "/setactive", HIGH_PERFORMANCE])
             return
@@ -280,6 +281,46 @@ class PowerPlanTweak(Tweak):
                 ctx.run(["powercfg", "/delete", saved["created"]])
             except TweakError:
                 pass  # leaving an unused plan behind is harmless
+        ctx.backup.drop(self.id)
+
+
+USB_SUBGROUP = "2a737441-1930-4402-8d77-b2bebba308a3"
+USB_SELECTIVE_SUSPEND = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
+_HEX = re.compile(r"0x([0-9a-f]{8})", re.I)
+
+
+@dataclass
+class UsbSuspendTweak(Tweak):
+    """Turn off USB selective suspend in the active power plan (plugged in + battery)."""
+
+    def _values(self, ctx, scheme: str) -> tuple[int, int]:
+        out = ctx.run(["powercfg", "/query", scheme, USB_SUBGROUP, USB_SELECTIVE_SUSPEND])
+        # Labels are translated, but the two current values are always hex.
+        found = _HEX.findall(out)
+        if len(found) < 2:
+            raise TweakError("This PC's power plan has no USB suspend setting")
+        return int(found[-2], 16), int(found[-1], 16)
+
+    def _set(self, ctx, scheme: str, ac: int, dc: int):
+        for flag, value in (("/setacvalueindex", ac), ("/setdcvalueindex", dc)):
+            ctx.run(["powercfg", flag, scheme, USB_SUBGROUP, USB_SELECTIVE_SUSPEND, str(value)])
+        ctx.run(["powercfg", "/setactive", active_scheme(ctx)])  # reload so it takes effect
+
+    def is_applied(self, ctx):
+        return self._values(ctx, active_scheme(ctx)) == (0, 0)
+
+    def apply(self, ctx):
+        scheme = active_scheme(ctx)
+        ac, dc = self._values(ctx, scheme)
+        ctx.backup.keep(self.id, {"scheme": scheme, "ac": ac, "dc": dc})
+        self._set(ctx, scheme, 0, 0)
+
+    def revert(self, ctx):
+        saved = ctx.backup.get(self.id)
+        if saved:
+            self._set(ctx, saved["scheme"], saved["ac"], saved["dc"])
+        else:
+            self._set(ctx, active_scheme(ctx), 1, 1)  # Windows default: enabled
         ctx.backup.drop(self.id)
 
 
@@ -323,6 +364,13 @@ TWEAKS: list[Tweak] = [
         description="Stops Windows from down-clocking the CPU and parking cores mid-game, which "
         "causes stutter and frame drops. Laptops will run warmer and use more battery.",
         category="FPS",
+    ),
+    UsbSuspendTweak(
+        id="usb_suspend",
+        title="Turn off USB selective suspend",
+        description="Stops Windows putting USB ports into power-saving mode. A controller, mouse or "
+        "headset that gets suspended can miss inputs or hitch for a moment when it wakes up.",
+        category="Input lag",
     ),
     RegistryTweak(
         id="game_mode",

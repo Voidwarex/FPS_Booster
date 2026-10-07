@@ -89,8 +89,10 @@ def test_nagle_with_no_interfaces_is_an_error(tmp_path):
 
 
 class FakePowercfg:
-    def __init__(self, active, has_high=True):
+    def __init__(self, active, has_high=True, usb=(1, 1)):
         self.active, self.has_high, self.deleted = active, has_high, []
+        self.usb = {}  # scheme -> [ac, dc]; unset schemes use the default
+        self.default_usb = list(usb)
 
     def __call__(self, cmd):
         if cmd[1] == "/getactivescheme":
@@ -102,6 +104,18 @@ class FakePowercfg:
             return ""
         if cmd[1] == "-duplicatescheme":
             return "Power Scheme GUID: 11111111-2222-3333-4444-555555555555  (Ultimate Performance)"
+        if cmd[1] == "/query":
+            ac, dc = self.usb.get(cmd[2], self.default_usb)
+            return (
+                f"Power Setting GUID: {cmd[4]}  (USB selective suspend setting)\n"
+                "  Possible Setting Index: 000\n  Possible Setting Friendly Name: Disabled\n"
+                f"Current AC Power Setting Index: 0x{ac:08x}\n"
+                f"Current DC Power Setting Index: 0x{dc:08x}\n"
+            )
+        if cmd[1] in ("/setacvalueindex", "/setdcvalueindex"):
+            values = self.usb.setdefault(cmd[2], list(self.default_usb))
+            values[0 if cmd[1] == "/setacvalueindex" else 1] = int(cmd[5])
+            return ""
         if cmd[1] == "/delete":
             self.deleted.append(cmd[2])
             return ""
@@ -142,3 +156,32 @@ def test_hklm_tweaks_need_admin():
         if isinstance(t, RegistryTweak) and not callable(t.values):
             if any(v.hive == HKLM for v in t.values):
                 assert t.admin, t.id
+
+
+def usb_tweak():
+    return next(t for t in tweaks.TWEAKS if t.id == "usb_suspend")
+
+
+def test_usb_suspend_apply_and_revert_restore_original(tmp_path):
+    pc = FakePowercfg(tweaks.BALANCED, usb=(1, 0))
+    ctx, t = make_ctx(tmp_path, run=pc), usb_tweak()
+    assert not t.is_applied(ctx)
+    t.apply(ctx)
+    assert pc.usb[tweaks.BALANCED] == [0, 0] and t.is_applied(ctx)
+    t.revert(ctx)
+    assert pc.usb[tweaks.BALANCED] == [1, 0] and not t.is_applied(ctx)
+
+
+def test_usb_suspend_revert_targets_the_plan_it_changed(tmp_path):
+    pc = FakePowercfg(tweaks.BALANCED)
+    ctx, t = make_ctx(tmp_path, run=pc), usb_tweak()
+    t.apply(ctx)
+    pc.active = tweaks.HIGH_PERFORMANCE  # user switched plans in between
+    t.revert(ctx)
+    assert pc.usb[tweaks.BALANCED] == [1, 1]
+
+
+def test_usb_suspend_missing_setting_is_an_error(tmp_path):
+    ctx = make_ctx(tmp_path, run=lambda cmd: "Power Scheme GUID: " + tweaks.BALANCED if "/getactivescheme" in cmd else "")
+    with pytest.raises(TweakError):
+        usb_tweak().is_applied(ctx)

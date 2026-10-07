@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 from collections import Counter
 from typing import Callable
@@ -21,6 +22,7 @@ from .core import (
     list_process_groups,
 )
 from .icons import get_icon
+from . import controller as pad
 from . import tweaks
 from .tweaks import TWEAKS, Tweak, TweakError
 
@@ -855,6 +857,178 @@ class TweaksView(ctk.CTkFrame):
             self.status.configure(text="✖ Didn't get administrator rights", text_color=DANGER)
 
 
+# ---- Controller view: measure polling rate --------------------------------
+
+LEVEL_COLORS = {"good": ACCENT, "ok": ACCENT, "warn": WARN, "bad": DANGER}
+
+
+class ControllerView(ctk.CTkFrame):
+    TEST_SECONDS = 5.0
+
+    def __init__(self, app: "FPSBoosterApp"):
+        super().__init__(app.body, fg_color="transparent")
+        self.app = app
+        self.controllers: list[pad.Controller] = []
+        self.choice = ctk.IntVar(value=0)
+        self.test: pad.PollTest | None = None
+
+        ctk.CTkLabel(self, text="Controller polling rate", font=font(18, "bold"), text_color=TEXT).pack(anchor="w")
+        ctk.CTkLabel(
+            self, text="Plug your controller in with a USB cable, pick it, press Start, then keep "
+            "moving a stick in circles until the test ends.",
+            font=font(13), text_color=MUTED,
+        ).pack(anchor="w", pady=(0, 12))
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+        body.grid_columnconfigure(0, weight=2, uniform="c")
+        body.grid_columnconfigure(1, weight=3, uniform="c")
+        body.grid_rowconfigure(0, weight=1)
+
+        # Left: controller list
+        left = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=14, border_width=1, border_color=BORDER)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        head = ctk.CTkFrame(left, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(14, 6))
+        ctk.CTkLabel(head, text="CONTROLLERS", font=font(11, "bold"), text_color=MUTED).pack(side="left")
+        self.refresh_btn = ctk.CTkButton(
+            head, text="⟳ Refresh", width=90, height=28, fg_color=PANEL_HI, hover_color=BORDER,
+            font=font(12), command=self.scan,
+        )
+        self.refresh_btn.pack(side="right")
+        self.list_frame = ctk.CTkScrollableFrame(left, fg_color="transparent")
+        self.list_frame.pack(fill="both", expand=True, padx=6, pady=(0, 10))
+
+        # Right: big readout
+        right = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=14, border_width=1, border_color=BORDER)
+        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        ctk.CTkLabel(right, text="UPDATES PER SECOND", font=font(11, "bold"), text_color=MUTED).pack(
+            anchor="w", padx=24, pady=(18, 0)
+        )
+        readout = ctk.CTkFrame(right, fg_color="transparent")
+        readout.pack(anchor="w", padx=24)
+        self.hz_label = ctk.CTkLabel(readout, text="—", font=font(64, "bold"), text_color=TEXT)
+        self.hz_label.pack(side="left")
+        ctk.CTkLabel(readout, text=" Hz", font=font(24, "bold"), text_color=MUTED).pack(side="left", pady=(22, 0))
+        self.sub_label = ctk.CTkLabel(right, text="Press Start to measure", font=font(13), text_color=MUTED)
+        self.sub_label.pack(anchor="w", padx=24)
+        self.progress = ctk.CTkProgressBar(right, height=8, fg_color=PANEL_HI, progress_color=ACCENT)
+        self.progress.set(0)
+        self.progress.pack(fill="x", padx=24, pady=(16, 16))
+        self.verdict = ctk.CTkLabel(
+            right, text="", font=font(13), text_color=TEXT, justify="left", anchor="w", wraplength=520,
+        )
+        self.verdict.pack(fill="x", padx=24)
+        self.start_btn = ctk.CTkButton(
+            right, text="▶  Start test", height=44, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            text_color="#04130d", font=font(15, "bold"), command=self.start_or_stop,
+        )
+        self.start_btn.pack(side="bottom", fill="x", padx=24, pady=20)
+        self.tip = ctk.CTkLabel(
+            right, text="Tip: close Steam and DS4Windows first. They can grab the controller "
+            "and change what this test sees.",
+            font=font(12), text_color=MUTED, justify="left", anchor="w", wraplength=520,
+        )
+        self.tip.pack(side="bottom", fill="x", padx=24)
+
+        self.scan()
+
+    def destroy(self):
+        if self.test:
+            self.test.cancel()
+        super().destroy()
+
+    # -- controller list --
+
+    def scan(self):
+        self.refresh_btn.configure(state="disabled")
+
+        def done(ok, result):
+            if not self.winfo_exists():
+                return
+            self.refresh_btn.configure(state="normal")
+            self.controllers = result if ok else []
+            self._render_list(None if ok else str(result))
+
+        run_in_thread(self.app, pad.list_controllers, done)
+
+    def _render_list(self, error: str | None):
+        for child in self.list_frame.winfo_children():
+            child.destroy()
+        if not self.controllers:
+            if error:
+                message = f"Couldn't look for controllers: {error}"
+            elif not pad.hid_available() and sys.platform != "win32":
+                message = "Install the 'hidapi' package to test controllers."
+            else:
+                message = "No controllers found.\nPlug one in with a USB cable and press Refresh."
+            ctk.CTkLabel(self.list_frame, text=message, font=font(13), text_color=MUTED, justify="left").pack(
+                anchor="w", padx=10, pady=20
+            )
+            self.start_btn.configure(state="disabled")
+            return
+        self.choice.set(min(self.choice.get(), len(self.controllers) - 1))
+        for i, c in enumerate(self.controllers):
+            row = ctk.CTkFrame(self.list_frame, fg_color=PANEL_HI, corner_radius=10)
+            row.pack(fill="x", pady=3)
+            ctk.CTkRadioButton(
+                row, text=c.name, variable=self.choice, value=i, font=font(13, "bold"),
+                text_color=TEXT, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            ).pack(anchor="w", padx=12, pady=(10, 2))
+            tags = ctk.CTkFrame(row, fg_color="transparent")
+            tags.pack(anchor="w", padx=40, pady=(0, 10))
+            color = WARN if c.wireless else "#7aa2ff" if c.connection == "XInput" else ACCENT
+            pill(tags, c.connection.upper(), color).pack(side="left")
+            ctk.CTkLabel(tags, text=c.detail, font=font(11), text_color=MUTED).pack(side="left", padx=8)
+        self.start_btn.configure(state="normal")
+
+    # -- test --
+
+    def start_or_stop(self):
+        if self.test and not self.test.done:
+            self.test.cancel()
+            return
+        if not self.controllers:
+            return
+        controller = self.controllers[self.choice.get()]
+        self.test = pad.PollTest(controller, self.TEST_SECONDS).start()
+        self.refresh_btn.configure(state="disabled")
+        self.start_btn.configure(text="■  Stop", fg_color=PANEL_HI, hover_color=BORDER, text_color=TEXT)
+        self.sub_label.configure(text=f"Testing {controller.name}… keep moving a stick!", text_color=ACCENT)
+        self.verdict.configure(text="")
+        self._tick()
+
+    def _tick(self):
+        test = self.test
+        if test is None or not self.winfo_exists():
+            return
+        if not test.done:
+            self.hz_label.configure(text=f"{test.live_rate():.0f}", text_color=TEXT)
+            self.progress.set(test.progress)
+            self.after(100, self._tick)
+            return
+
+        self.refresh_btn.configure(state="normal")
+        self.start_btn.configure(
+            text="▶  Test again", fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="#04130d"
+        )
+        self.progress.set(1)
+        if test.error:
+            self.hz_label.configure(text="—", text_color=TEXT)
+            self.sub_label.configure(text="Test failed", text_color=DANGER)
+            self.verdict.configure(text=f"Couldn't read the controller: {test.error}", text_color=DANGER)
+            return
+        result = test.result()
+        level, message = pad.describe(result, test.controller)
+        color = LEVEL_COLORS[level]
+        self.hz_label.configure(text=f"{result.rate_hz:.0f}" if result.rate_hz else "—", text_color=color)
+        polling = f"≈ {result.standard_hz} Hz polling · " if result.standard_hz else ""
+        self.sub_label.configure(
+            text=f"{polling}{result.reports:,} updates in {self.TEST_SECONDS:.0f} s", text_color=MUTED
+        )
+        self.verdict.configure(text=message, text_color=color if level == "bad" else TEXT)
+
+
 # ---- Main window ---------------------------------------------------------
 
 
@@ -884,10 +1058,12 @@ class FPSBoosterApp(ctk.CTk):
         ram.pack(side="right")
 
         self.nav = ctk.CTkSegmentedButton(
-            header, values=["Presets", "Tweaks"], width=220, height=36, font=font(14, "bold"),
+            header, values=["Presets", "Tweaks", "Controller"], width=330, height=36, font=font(14, "bold"),
             selected_color=ACCENT, selected_hover_color=ACCENT_HOVER, text_color=TEXT,
             fg_color=PANEL, unselected_color=PANEL, unselected_hover_color=PANEL_HI,
-            command=lambda tab: self.show_tweaks() if tab == "Tweaks" else self.show_home(),
+            command=lambda tab: {"Tweaks": self.show_tweaks, "Controller": self.show_controller}.get(
+                tab, self.show_home
+            )(),
         )
         self.nav.pack(side="left", padx=40)
         self.ram_label = ctk.CTkLabel(ram, text="RAM", font=font(12, "bold"), text_color=TEXT)
@@ -922,6 +1098,10 @@ class FPSBoosterApp(ctk.CTk):
     def show_tweaks(self):
         self.nav.set("Tweaks")
         self._swap(TweaksView(self))
+
+    def show_controller(self):
+        self.nav.set("Controller")
+        self._swap(ControllerView(self))
 
     def set_icon(self, name: str, image) -> None:
         current = self._icons.get(name.lower())

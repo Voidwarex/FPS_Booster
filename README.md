@@ -42,6 +42,7 @@ input lag. Each one shows whether it's on, and has a switch to turn it on or off
 | Tweak | Helps | Admin | Restart |
 |---|---|:-:|:-:|
 | High performance power plan (Ultimate Performance where High is hidden) | FPS, stutter | | |
+| Turn off USB selective suspend | Controller / mouse hiccups | | |
 | Turn on Game Mode | FPS | | |
 | Turn off Xbox background recording (Game DVR) | FPS, latency | | |
 | Turn off mouse acceleration | Aim consistency | | |
@@ -60,6 +61,24 @@ input lag. Each one shows whether it's on, and has a switch to turn it on or off
 - Tweaks marked ADMIN need FPS Booster to run as administrator. The
   **Restart as admin** button does that for you.
 - Nothing here turns off security features (Defender, Memory Integrity, etc.).
+
+## Controller polling rate
+
+The **Controller** tab measures how many updates per second your controller
+sends (its polling rate). Plug it in, pick it, press **Start test** and keep
+moving a stick in circles for 5 seconds.
+
+![Controller test](docs/controller.png)
+
+- Xbox controllers are read through XInput. PlayStation and most other
+  controllers are read as raw USB/Bluetooth HID devices (needs `hidapi`).
+- The result shows the nearest standard polling rate (125 / 250 / 500 /
+  1000 Hz…), the time between updates, and how much delay a 1000 Hz
+  overclock could save.
+- Bluetooth controllers are flagged: overclocking only works over a USB cable.
+- Close Steam and DS4Windows first; they can take over the controller.
+
+FPS Booster only measures the rate. It doesn't overclock the controller.
 
 ## Install & run
 
@@ -100,4 +119,5 @@ python -m pytest
 - `fps_booster/core.py`: process scanning, killing and preset storage (no GUI).
 - `fps_booster/icons.py`: program icons (.exe icons on Windows, letter badges elsewhere).
 - `fps_booster/tweaks.py`: Windows tweaks, with backup and revert.
+- `fps_booster/controller.py`: controller polling-rate measurement (XInput + HID).
 - `fps_booster/app.py`: the CustomTkinter UI.
